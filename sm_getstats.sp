@@ -54,7 +54,7 @@ public void OnStatsReceived(HTTPResponse response, any userid) {
 
 
                 PrintToChat(client, "Stats: Kills:%d Deaths:%d Points:%d", kills, deaths, points);
-                PrintToChat(client, "Rating:%.2f GRank:#%d", rating, grank) ;
+                PrintToChat(client, "Rating:%.2f GRank:#%d", rating * 100.0 , grank) ;
                 PrintToChat(client, "VORP:%.2f", vorp) ;
 
                 delete general;
