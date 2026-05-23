@@ -19,10 +19,10 @@ bool g_IsBalancing;
 #define TEAM_CORPS 3
 
 public Plugin myinfo = {
-    name = "Stats HTTP Getter",
+    name = "Stats balancer",
     author = "alpha",
-    description = "Gets player stats via HTTPS",
-    version = "1.1",
+    description = "Gets player stats via HTTPS and balances teams",
+    version = "2.0",
     url = ""
 }
 
