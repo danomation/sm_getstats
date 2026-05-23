@@ -1,4 +1,3 @@
-emod/scripting# cat stats_test.sp
 #include <sdktools>
 #include <sourcemod>
 #include <ripext>
