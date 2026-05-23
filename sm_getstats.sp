@@ -1,3 +1,5 @@
+emod/scripting# cat stats_test.sp
+#include <sdktools>
 #include <sourcemod>
 #include <ripext>
 
@@ -13,24 +15,27 @@ ArrayList g_MatchResults;
 int g_PendingRequests;
 int g_MatchClient;
 bool g_IsBalancing;
+int g_VoteCooldown = 0;
+bool g_JustBalanced[MAXPLAYERS + 1] = { false, ... };
 
 #define TEAM_SPECTATOR 1
 #define TEAM_PUNK 2
 #define TEAM_CORPS 3
 
 public Plugin myinfo = {
-    name = "Stats balancer",
+    name = "Custom stats - team balancer",
     author = "alpha",
-    description = "Gets player stats via HTTPS and balances teams",
-    version = "2.0",
+    description = "Gets player stats and balances players",
+    version = "2.1",
     url = ""
 }
 
 public void OnPluginStart() {
+    HookEvent("player_spawn", Event_PlayerSpawn);
     RegConsoleCmd("sm_getstats", Command_GetStats);
     RegConsoleCmd("sm_getmatch", Command_GetMatch);
     RegConsoleCmd("sm_balance", Command_Balance, "Vote to balance teams by rating");
-
+    RegAdminCmd("sm_forcebalance", Command_ForceBalance, ADMFLAG_GENERIC, "Force balance teams by rating");
 }
 
 public Action Command_GetStats(int client, int args) {
@@ -65,31 +70,92 @@ public Action Command_Balance(int client, int args) {
         return Plugin_Handled;
     }
 
+    int currentTime = GetTime();
+    if (currentTime < g_VoteCooldown) {
+        int remaining = g_VoteCooldown - currentTime;
+        PrintToChat(client, "Vote on cooldown. %d:%02d remaining.", remaining / 60, remaining % 60);
+        return Plugin_Handled;
+    }
+
     Menu vote = new Menu(VoteBalanceHandler);
     vote.SetTitle("Balance teams by rating?");
     vote.AddItem("yes", "Yes");
     vote.AddItem("no", "No");
     vote.ExitButton = false;
-    vote.DisplayVoteToAll(20);
-
+    SetVoteResultCallback(vote, VoteBalanceResults);
+    vote.DisplayVoteToAll(30);
+    CreateTimer(15.0, Timer_VoteReminder);
     g_MatchClient = GetClientUserId(client);
+    g_VoteCooldown = currentTime + 90;
 
     return Plugin_Handled;
 }
 
-public int VoteBalanceHandler(Menu menu, MenuAction action, int param1, int param2) {
-    if (action == MenuAction_VoteEnd) {
-        if (param1 == 0) { // "yes" won
-            int client = GetClientOfUserId(g_MatchClient);
-            if (client > 0) {
-                PrintToChatAll("Vote passed! Balancing teams...");
-                g_IsBalancing = true;
-                FetchAllPlayers(client);
-            }
-        } else {
-            PrintToChatAll("Vote failed.");
+public Action Timer_VoteReminder(Handle timer) {
+    if (IsVoteInProgress()) {
+        PrintToChatAll("Vote ending in 15 seconds! Type !vote to vote.");
+    }
+    return Plugin_Stop;
+}
+
+public void VoteBalanceResults(Menu menu, int num_votes, int num_clients, const int[][] client_info, int num_items, const int[][] item_info) {
+    int totalPlayers = 0;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (IsClientInGame(i) && !IsFakeClient(i)) {
+            totalPlayers++;
         }
-    } else if (action == MenuAction_End) {
+    }
+
+    int requiredYes = RoundToCeil(totalPlayers / 2.0);
+
+    int yesVotes = 0;
+    int noVotes = 0;
+    for (int i = 0; i < num_items; i++) {
+        if (item_info[i][VOTEINFO_ITEM_INDEX] == 0)
+            yesVotes = item_info[i][VOTEINFO_ITEM_VOTES];
+        else if (item_info[i][VOTEINFO_ITEM_INDEX] == 1)
+            noVotes = item_info[i][VOTEINFO_ITEM_VOTES];
+    }
+
+    if (yesVotes >= requiredYes && yesVotes > noVotes) {
+        PrintToChatAll("Vote passed! (%d yes, %d no) Balancing teams...", yesVotes, noVotes);
+        int client = GetClientOfUserId(g_MatchClient);
+        if (client > 0) {
+            g_IsBalancing = true;
+            FetchAllPlayers(client);
+        }
+    } else {
+        PrintToChatAll("Vote failed. (%d yes, %d no, needed %d yes.)", yesVotes, noVotes, requiredYes);
+    }
+}
+
+public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
+    int client = GetClientOfUserId(event.GetInt("userid"));
+    if (client > 0 && g_JustBalanced[client]) {
+        g_JustBalanced[client] = false;
+        RequestFrame(Frame_KillPlayer, GetClientUserId(client));
+    }
+}
+
+public void Frame_KillPlayer(any userid) {
+    int client = GetClientOfUserId(userid);
+    if (client > 0 && IsPlayerAlive(client)) {
+        ForcePlayerSuicide(client);
+    }
+}
+
+
+public Action Command_ForceBalance(int client, int args) {
+    PrintToChatAll("Admin forcing team balance...");
+    g_IsBalancing = true;
+    g_MatchClient = GetClientUserId(client);
+    FetchAllPlayers(client);
+    return Plugin_Handled;
+}
+
+
+public int VoteBalanceHandler(Menu menu, MenuAction action, int param1, int param2) {
+    if (action == MenuAction_End) {
         delete menu;
     }
     return 0;
@@ -167,23 +233,33 @@ public void OnStatsReceived2(HTTPResponse response, DataPack pack) {
 
     g_PendingRequests--;
 
+    MatchEntry entry;
+    entry.userid = playerUserId;
+    entry.rating = 0.0;
+    entry.vorp = 1.0;
+    entry.grank = 0;
+
+    int player = GetClientOfUserId(playerUserId);
+    if (player > 0 && IsClientInGame(player)) {
+        GetClientName(player, entry.name, sizeof(entry.name));
+    }
+
     if (response.Status == HTTPStatus_OK) {
         JSONObject json = view_as<JSONObject>(response.Data);
         if (json != null) {
             JSONObject general = view_as<JSONObject>(json.Get("general"));
             if (general != null) {
-                MatchEntry entry;
                 json.GetString("name", entry.name, sizeof(entry.name));
-                entry.userid = playerUserId;
                 entry.rating = general.GetFloat("rating");
                 entry.vorp = general.GetFloat("vorp");
                 entry.grank = general.GetInt("grank");
-                g_MatchResults.PushArray(entry);
                 delete general;
             }
             delete json;
         }
     }
+
+    g_MatchResults.PushArray(entry);
 
     if (g_PendingRequests <= 0) {
         g_MatchResults.SortCustom(SortByRating);
@@ -247,17 +323,8 @@ void BalanceTeams(int client) {
         int currentTeam = GetClientTeam(player);
         if (currentTeam == teamAssign[i]) continue;
 
-        if (IsPlayerAlive(player)) {
-            FakeClientCommand(player, "kill");
-        }
-
+        g_JustBalanced[player] = true;
         ChangeClientTeam(player, teamAssign[i]);
-
-        //if (IsPlayerAlive(player)) {
-        //    FakeClientCommand(player, "kill");
-        //}
-
-        //FakeClientCommand(player, "jointeam %d", teamAssign[i]);
     }
 
     // Print results
